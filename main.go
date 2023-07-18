@@ -1,15 +1,11 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"math/rand"
-	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 
@@ -17,46 +13,52 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// Created using https://mholt.github.io/json-to-go/
-type Response struct {
-	IP   string `json:"ip"`
-	Port int    `json:"port"`
-	Motd struct {
-		Raw   []string `json:"raw"`
-		Clean []string `json:"clean"`
-		HTML  []string `json:"html"`
-	} `json:"motd"`
-	Players struct {
-		Online int `json:"online"`
-		Max    int `json:"max"`
-	} `json:"players"`
-	Version  string `json:"version"`
-	Online   bool   `json:"online"`
-	Hostname string `json:"hostname"`
-	Map      string `json:"map"`
-	Gamemode string `json:"gamemode"`
-	Serverid string `json:"serverid"`
+type Answers struct {
+	OriginChannelId string
+	FavFood         string
+	FavGame         string
 }
 
+var responses map[string]Answers = map[string]Answers{}
+
 const prefix string = "!gobot"
-const minecraftUrl string = "https://api.mcsrvstat.us/bedrock/2/bytez.us"
 
-func minecraftCheck() Response {
+func (a *Answers) ToMessageEmbed() discordgo.MessageEmbed {
+	fields := []*discordgo.MessageEmbedField{
+		{
+			Name:  "Fav",
+			Value: a.FavFood,
+		},
+		{
+			Name:  "Fav game",
+			Value: a.FavGame,
+		},
+	}
 
-	resp, err := http.Get(minecraftUrl)
+	return discordgo.MessageEmbed{
+		Title:  "New responses!",
+		Fields: fields,
+	}
+}
+
+func UserPromptHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
+	// user channel
+	channel, err := s.UserChannelCreate(m.Author.ID)
 	if err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 
-	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
-
-	var result Response
-	if err := json.Unmarshal(body, &result); err != nil {
-		fmt.Println("Can not unmarshal JSON")
+	// if the user is already answers questions, ignore it, otherwise ask questions
+	if _, ok := responses[channel.ID]; !ok {
+		responses[channel.ID] = Answers{
+			OriginChannelId: m.ChannelID,
+			FavFood:         "",
+			FavGame:         "",
+		}
+		s.ChannelMessageSend(channel.ID, "Hey there! Here are some questions")
+	} else {
+		s.ChannelMessageSend(channel.ID, "We're still waiting... ")
 	}
-
-	return result
 }
 
 func main() {
@@ -73,6 +75,30 @@ func main() {
 			return
 		}
 
+		// DM logic
+		if m.GuildID == "" {
+			answers, ok := responses[m.ChannelID]
+			if !ok {
+				return
+			}
+
+			if answers.FavFood == "" {
+				answers.FavFood = m.Content
+
+				s.ChannelMessageSend(m.ChannelID, "Nice what fav game")
+
+				responses[m.ChannelID] = answers
+				return
+			} else {
+				answers.FavGame = m.Content
+				embed := answers.ToMessageEmbed()
+				s.ChannelMessageSendEmbed(answers.OriginChannelId, &embed)
+
+				delete(responses, m.ChannelID)
+			}
+		}
+
+		// server logic
 		args := strings.Split(m.Content, " ")
 
 		if args[0] != prefix {
@@ -124,14 +150,12 @@ func main() {
 		if args[1] == "minecraft" {
 			res := minecraftCheck()
 
-			des := "MOTD: " + res.Motd.Clean[0] + "\nIP: " + res.IP + "\nOnline: " + strconv.FormatBool(res.Online) + "\nPlayers Online: " + strconv.Itoa(res.Players.Online) + "\nMap: " + res.Map
-
-			embed := discordgo.MessageEmbed{
-				Title:       res.Hostname,
-				Description: des,
-			}
-
+			embed := res.ToMessageEmbed()
 			s.ChannelMessageSendEmbed(m.ChannelID, &embed)
+		}
+
+		if args[1] == "prompt" {
+			UserPromptHandler(s, m)
 		}
 	})
 
