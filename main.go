@@ -1,15 +1,19 @@
 package main
 
 import (
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
 	"github.com/bwmarrin/discordgo"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/joho/godotenv"
 )
 
@@ -17,6 +21,7 @@ type Answers struct {
 	OriginChannelId string
 	FavFood         string
 	FavGame         string
+	RecordId        int64
 }
 
 var responses map[string]Answers = map[string]Answers{}
@@ -32,6 +37,10 @@ func (a *Answers) ToMessageEmbed() discordgo.MessageEmbed {
 		{
 			Name:  "Fav game",
 			Value: a.FavGame,
+		},
+		{
+			Name:  "Record Id",
+			Value: strconv.FormatInt(a.RecordId, 10),
 		},
 	}
 
@@ -61,6 +70,81 @@ func UserPromptHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 }
 
+func UserPromtResponseHandler(db *sql.DB, s *discordgo.Session, m *discordgo.MessageCreate) {
+	answers, ok := responses[m.ChannelID]
+	if !ok {
+		return
+	}
+
+	if answers.FavFood == "" {
+		answers.FavFood = m.Content
+
+		s.ChannelMessageSend(m.ChannelID, "Nice what fav game")
+
+		responses[m.ChannelID] = answers
+		return
+	} else {
+		answers.FavGame = m.Content
+
+		query := "insert into discord_messages (payload, user_id) values (?,?)"
+		jbytes, err := json.Marshal(answers)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		res, err := db.Exec(query, string(jbytes), m.ChannelID)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		lastInserted, err := res.LastInsertId()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		answers.RecordId = lastInserted
+
+		embed := answers.ToMessageEmbed()
+		s.ChannelMessageSendEmbed(answers.OriginChannelId, &embed)
+
+		delete(responses, m.ChannelID)
+	}
+}
+
+func AnswersHandler(db *sql.DB, s *discordgo.Session, m *discordgo.MessageCreate) {
+	spl := strings.Split(m.Content, " ")
+	if len(spl) < 3 {
+		s.ChannelMessageSend(m.ChannelID, "an ID must be provided. Ex; '!gobot answers 1'")
+		return
+	}
+
+	id, err := strconv.Atoi(spl[2])
+	if err != nil {
+		log.Fatal()
+	}
+
+	var recordId int64
+	var answerStr string
+	var userId int64
+
+	query := "select * from discord_messages where id = ?"
+	row := db.QueryRow(query, id)
+	err = row.Scan(&recordId, &answerStr, &userId)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var answers Answers
+	err = json.Unmarshal([]byte(answerStr), &answers)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	answers.RecordId = recordId
+	embed := answers.ToMessageEmbed()
+	s.ChannelMessageSendEmbed(m.ChannelID, &embed)
+}
+
 func main() {
 	godotenv.Load()
 	token := os.Getenv("BOT_TOKEN")
@@ -70,6 +154,12 @@ func main() {
 		log.Fatal(err)
 	}
 
+	db, err := sql.Open("mysql", os.Getenv("CONNECTION_STRING"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
 	sess.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
 		if m.Author.ID == s.State.User.ID {
 			return
@@ -77,25 +167,7 @@ func main() {
 
 		// DM logic
 		if m.GuildID == "" {
-			answers, ok := responses[m.ChannelID]
-			if !ok {
-				return
-			}
-
-			if answers.FavFood == "" {
-				answers.FavFood = m.Content
-
-				s.ChannelMessageSend(m.ChannelID, "Nice what fav game")
-
-				responses[m.ChannelID] = answers
-				return
-			} else {
-				answers.FavGame = m.Content
-				embed := answers.ToMessageEmbed()
-				s.ChannelMessageSendEmbed(answers.OriginChannelId, &embed)
-
-				delete(responses, m.ChannelID)
-			}
+			UserPromtResponseHandler(db, s, m)
 		}
 
 		// server logic
@@ -156,6 +228,10 @@ func main() {
 
 		if args[1] == "prompt" {
 			UserPromptHandler(s, m)
+		}
+
+		if args[1] == "answers" {
+			AnswersHandler(db, s, m)
 		}
 	})
 
